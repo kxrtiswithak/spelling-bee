@@ -7,7 +7,8 @@ from spelling_bee import (
     get_word, check_spelling, compare, format_success, format_failure,
     speak_word, play_round, init_tts_engine, _find_espeak_library,
     SubprocessTTS, get_definition, get_sentence, configure_voice,
-    WORD_LIST, _word_cache,
+    WORD_LIST, _word_cache, _fetch_word_data,
+    _FALLBACK_SENTENCES, _DEFAULT_SENTENCE,
 )
 
 
@@ -179,6 +180,20 @@ class TestSpeakWord:
         assert call_order == ["say", "runAndWait"]
 
 
+class TestFetchWordData:
+    @pytest.fixture(autouse=True)
+    def _clear_cache(self):
+        _word_cache.clear()
+        yield
+        _word_cache.clear()
+
+    @patch("urllib.request.urlopen", side_effect=Exception("network error"))
+    def test_does_not_cache_failures(self, mock_urlopen):
+        result = _fetch_word_data("testword")
+        assert result is None
+        assert "testword" not in _word_cache
+
+
 class TestGetDefinition:
     @patch("spelling_bee._fetch_word_data", return_value=[{
         "meanings": [{"definitions": [{"definition": "a round fruit"}]}]
@@ -205,14 +220,46 @@ class TestGetSentence:
         assert get_sentence("apple") == "I ate an apple."
 
     @patch("spelling_bee._fetch_word_data", return_value=[{
-        "meanings": [{"definitions": [{"definition": "..."}]}]
+        "meanings": [{"partOfSpeech": "noun",
+                      "definitions": [{"definition": "..."}]}]
     }])
-    def test_returns_none_when_no_example(self, mock_fetch):
-        assert get_sentence("apple") is None
+    def test_constructs_noun_fallback_when_no_example(self, mock_fetch):
+        result = get_sentence("apple")
+        assert "apple" in result
+        assert result == _FALLBACK_SENTENCES["noun"].format(word="apple")
+
+    @patch("spelling_bee._fetch_word_data", return_value=[{
+        "meanings": [{"partOfSpeech": "verb",
+                      "definitions": [{"definition": "..."}]}]
+    }])
+    def test_constructs_verb_fallback(self, mock_fetch):
+        result = get_sentence("delegate")
+        assert "delegate" in result
+        assert result == _FALLBACK_SENTENCES["verb"].format(word="delegate")
+
+    @patch("spelling_bee._fetch_word_data", return_value=[{
+        "meanings": [{"partOfSpeech": "adjective",
+                      "definitions": [{"definition": "..."}]}]
+    }])
+    def test_constructs_adjective_fallback(self, mock_fetch):
+        result = get_sentence("superior")
+        assert "superior" in result
+        assert result == _FALLBACK_SENTENCES["adjective"].format(word="superior")
+
+    @patch("spelling_bee._fetch_word_data", return_value=[{
+        "meanings": [{"partOfSpeech": "adverb",
+                      "definitions": [{"definition": "..."}]}]
+    }])
+    def test_constructs_adverb_fallback(self, mock_fetch):
+        result = get_sentence("swiftly")
+        assert "swiftly" in result
+        assert result == _FALLBACK_SENTENCES["adverb"].format(word="swiftly")
 
     @patch("spelling_bee._fetch_word_data", return_value=None)
-    def test_returns_none_on_fetch_failure(self, mock_fetch):
-        assert get_sentence("apple") is None
+    def test_returns_default_fallback_on_fetch_failure(self, mock_fetch):
+        result = get_sentence("apple")
+        assert "apple" in result
+        assert result == _DEFAULT_SENTENCE.format(word="apple")
 
     @patch("spelling_bee._fetch_word_data", return_value=[{
         "meanings": [
@@ -222,6 +269,14 @@ class TestGetSentence:
     }])
     def test_searches_across_meanings(self, mock_fetch):
         assert get_sentence("test") == "Found it!"
+
+    @patch("spelling_bee._fetch_word_data", return_value=[{
+        "meanings": [{"partOfSpeech": "interjection",
+                      "definitions": [{"definition": "..."}]}]
+    }])
+    def test_unknown_pos_uses_default_sentence(self, mock_fetch):
+        result = get_sentence("hello")
+        assert result == _DEFAULT_SENTENCE.format(word="hello")
 
 
 class TestConfigureVoice:
@@ -309,13 +364,14 @@ class TestPlayRound:
         engine.say.assert_any_call("apple")
         engine.say.assert_any_call("I ate an apple.")
 
-    @patch("spelling_bee.get_sentence", return_value=None)
+    @patch("spelling_bee.get_sentence", return_value="Please spell the word apple.")
     @patch("builtins.input", side_effect=["3", "4", "apple"])
-    def test_option_3_handles_missing_sentence(self, mock_input, mock_sent, capsys):
+    def test_option_3_shows_fallback_sentence(self, mock_input, mock_sent, capsys):
         engine = MagicMock()
         play_round("apple", engine)
         captured = capsys.readouterr()
-        assert "not available" in captured.out.lower()
+        assert "Please spell the word apple." in captured.out
+        engine.say.assert_any_call("Please spell the word apple.")
 
     @patch("builtins.input", side_effect=["4", "apple"])
     def test_speaks_word_at_start(self, mock_input):

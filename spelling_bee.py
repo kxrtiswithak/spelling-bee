@@ -366,7 +366,12 @@ _word_cache = {}
 
 
 def _fetch_word_data(word):
-    """Fetch word data from the Free Dictionary API, with simple caching."""
+    """Fetch word data from the Free Dictionary API, with caching.
+
+    Only successful responses are cached.  Failures are *not* cached so
+    that a transient network error during ``get_word`` validation does
+    not permanently prevent definition/sentence retrieval later.
+    """
     if word in _word_cache:
         return _word_cache[word]
     try:
@@ -376,7 +381,6 @@ def _fetch_word_data(word):
         _word_cache[word] = data
         return data
     except Exception:
-        _word_cache[word] = None
         return None
 
 
@@ -391,19 +395,38 @@ def get_definition(word):
         return None
 
 
+_FALLBACK_SENTENCES = {
+    "noun": "Learning about the {word} was very interesting.",
+    "verb": "It is important to {word} in this situation.",
+    "adjective": "Many people considered it to be quite {word}.",
+    "adverb": "She performed {word} during the competition.",
+}
+_DEFAULT_SENTENCE = "Please spell the word {word}."
+
+
 def get_sentence(word):
-    """Return an example sentence for the word, or None."""
+    """Return an example sentence for the word.
+
+    Tries the API first.  If no example exists, constructs a sentence
+    using the word's part of speech so the player always hears the word
+    in context.
+    """
     data = _fetch_word_data(word)
-    if not data:
-        return None
-    try:
-        for meaning in data[0]["meanings"]:
-            for defn in meaning["definitions"]:
-                if "example" in defn:
-                    return defn["example"]
-    except (KeyError, IndexError):
-        pass
-    return None
+    if data:
+        try:
+            for meaning in data[0]["meanings"]:
+                for defn in meaning["definitions"]:
+                    if "example" in defn:
+                        return defn["example"]
+        except (KeyError, IndexError):
+            pass
+        # No example in API — build one from the part of speech
+        try:
+            pos = data[0]["meanings"][0]["partOfSpeech"]
+            return _FALLBACK_SENTENCES.get(pos, _DEFAULT_SENTENCE).format(word=word)
+        except (KeyError, IndexError):
+            pass
+    return _DEFAULT_SENTENCE.format(word=word)
 
 
 def configure_voice(engine):
@@ -470,7 +493,7 @@ def get_word(max_length=8):
     candidates = [w for w in WORD_LIST if len(w) <= max_length]
     random.shuffle(candidates)
     for word in candidates[:15]:
-        if get_definition(word) and get_sentence(word):
+        if get_definition(word):
             return word
     # Fallback: return a word even without full API validation
     return random.choice(candidates)
@@ -534,11 +557,8 @@ def play_round(word, engine):
                 print("\nDefinition not available.")
         elif choice == "3":
             sentence = get_sentence(word)
-            if sentence:
-                print(f"\nSentence: {sentence}")
-                speak_word(sentence, engine)
-            else:
-                print("\nSentence not available.")
+            print(f"\nSentence: {sentence}")
+            speak_word(sentence, engine)
         elif choice == "4":
             break
     attempt = input("Type your spelling: ")
