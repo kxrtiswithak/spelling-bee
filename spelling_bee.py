@@ -1,5 +1,6 @@
 import os
 import shutil
+import subprocess
 import sys
 
 import pyttsx3
@@ -34,8 +35,55 @@ def _find_espeak_library():
     return None
 
 
+class SubprocessTTS:
+    """Fallback TTS engine using subprocess commands directly.
+
+    Used when pyttsx3's audio backend is unavailable (e.g. no aplay on Termux).
+    Provides the same say()/runAndWait() interface as a pyttsx3 engine.
+    """
+
+    _COMMANDS = [
+        ["espeak-ng"],
+        ["espeak"],
+        ["termux-tts-speak"],
+    ]
+
+    def __init__(self):
+        self._word = None
+
+    def say(self, word):
+        self._word = word
+
+    def runAndWait(self):
+        if self._word is None:
+            return
+        word = self._word
+        self._word = None
+        for base_cmd in self._COMMANDS:
+            try:
+                subprocess.run(
+                    base_cmd + [word],
+                    check=True,
+                    capture_output=True,
+                )
+                return
+            except (FileNotFoundError, subprocess.CalledProcessError):
+                continue
+
+
 def init_tts_engine():
-    """Initialize pyttsx3, with fallback for non-standard espeak installations (e.g. Termux)."""
+    """Initialize TTS engine with fallback for non-standard platforms.
+
+    On Linux, pyttsx3's espeak driver plays audio via aplay (ALSA).
+    If aplay is not available (e.g. Termux on Android), returns a
+    SubprocessTTS that calls espeak-ng/espeak/termux-tts-speak directly.
+    """
+    # pyttsx3's espeak driver hardcodes os.system("aplay ...") for Linux
+    # playback. If aplay is missing, audio silently fails, so skip pyttsx3
+    # entirely and use SubprocessTTS which calls TTS commands directly.
+    if sys.platform.startswith("linux") and not shutil.which("aplay"):
+        return SubprocessTTS()
+
     try:
         return pyttsx3.init()
     except Exception as original_error:

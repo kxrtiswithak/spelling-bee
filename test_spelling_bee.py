@@ -1,9 +1,10 @@
-import os
+import subprocess
 from unittest.mock import MagicMock, patch, call
 from colorama import Fore, Style
 from spelling_bee import (
     get_word, check_spelling, compare, format_success, format_failure,
     speak_word, play_round, init_tts_engine, _find_espeak_library,
+    SubprocessTTS,
 )
 
 
@@ -217,17 +218,19 @@ class TestFindEspeakLibrary:
 
 
 class TestInitTtsEngine:
+    @patch("shutil.which", return_value="/usr/bin/aplay")
     @patch("spelling_bee.pyttsx3")
-    def test_returns_engine_when_init_succeeds(self, mock_pyttsx3):
+    def test_returns_engine_when_init_succeeds(self, mock_pyttsx3, mock_which):
         mock_engine = MagicMock()
         mock_pyttsx3.init.return_value = mock_engine
         engine = init_tts_engine()
         assert engine is mock_engine
         mock_pyttsx3.init.assert_called_once()
 
+    @patch("shutil.which", return_value="/usr/bin/aplay")
     @patch("spelling_bee._find_espeak_library", return_value=None)
     @patch("spelling_bee.pyttsx3")
-    def test_raises_when_init_fails_and_no_lib_found(self, mock_pyttsx3, mock_find):
+    def test_raises_when_init_fails_and_no_lib_found(self, mock_pyttsx3, mock_find, mock_which):
         mock_pyttsx3.init.side_effect = RuntimeError("eSpeak not installed")
         try:
             init_tts_engine()
@@ -235,12 +238,67 @@ class TestInitTtsEngine:
         except RuntimeError as e:
             assert "eSpeak" in str(e)
 
+    @patch("shutil.which", return_value="/usr/bin/aplay")
     @patch("spelling_bee._find_espeak_library", return_value="/termux/lib/libespeak-ng.so")
     @patch("spelling_bee.pyttsx3")
-    def test_retries_with_patched_loader_when_lib_found(self, mock_pyttsx3, mock_find):
+    def test_retries_with_patched_loader_when_lib_found(self, mock_pyttsx3, mock_find, mock_which):
         mock_engine = MagicMock()
         # First call fails, second (after patching) succeeds
         mock_pyttsx3.init.side_effect = [RuntimeError("eSpeak not installed"), mock_engine]
         engine = init_tts_engine()
         assert engine is mock_engine
         assert mock_pyttsx3.init.call_count == 2
+
+    @patch("shutil.which", side_effect=lambda b: None if b == "aplay" else "/usr/bin/" + b)
+    @patch("sys.platform", "linux")
+    def test_returns_subprocess_tts_on_linux_without_aplay(self, mock_which):
+        engine = init_tts_engine()
+        assert isinstance(engine, SubprocessTTS)
+
+    @patch("spelling_bee.pyttsx3")
+    @patch("shutil.which", return_value="/usr/bin/aplay")
+    @patch("sys.platform", "linux")
+    def test_returns_pyttsx3_on_linux_with_aplay(self, mock_which, mock_pyttsx3):
+        mock_engine = MagicMock()
+        mock_pyttsx3.init.return_value = mock_engine
+        engine = init_tts_engine()
+        assert engine is mock_engine
+
+
+class TestSubprocessTTS:
+    def test_has_say_and_run_and_wait_interface(self):
+        tts = SubprocessTTS()
+        assert hasattr(tts, "say")
+        assert hasattr(tts, "runAndWait")
+
+    @patch("subprocess.run")
+    def test_say_and_run_and_wait_calls_subprocess(self, mock_run):
+        tts = SubprocessTTS()
+        tts.say("hello")
+        tts.runAndWait()
+        mock_run.assert_called_once()
+        cmd = mock_run.call_args[0][0]
+        assert "hello" in cmd
+
+    @patch("subprocess.run", side_effect=[
+        FileNotFoundError(),
+        FileNotFoundError(),
+        MagicMock(),
+    ])
+    def test_tries_next_command_on_failure(self, mock_run):
+        tts = SubprocessTTS()
+        tts.say("test")
+        tts.runAndWait()
+        assert mock_run.call_count == 3
+
+    @patch("subprocess.run")
+    def test_run_and_wait_without_say_is_noop(self, mock_run):
+        tts = SubprocessTTS()
+        tts.runAndWait()
+        mock_run.assert_not_called()
+
+    @patch("subprocess.run", side_effect=FileNotFoundError())
+    def test_no_crash_when_all_commands_fail(self, mock_run):
+        tts = SubprocessTTS()
+        tts.say("word")
+        tts.runAndWait()  # should not raise
