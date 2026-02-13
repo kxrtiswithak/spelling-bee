@@ -1,33 +1,62 @@
 import json
 import subprocess
+import pytest
 from unittest.mock import MagicMock, patch, call
 from colorama import Fore, Style
 from spelling_bee import (
     get_word, check_spelling, compare, format_success, format_failure,
     speak_word, play_round, init_tts_engine, _find_espeak_library,
     SubprocessTTS, get_definition, get_sentence, configure_voice,
+    WORD_LIST, _word_cache,
 )
 
 
+# Mock API response with both definition and example sentence
+_MOCK_WORD_DATA = [{
+    "meanings": [{
+        "definitions": [{
+            "definition": "test definition",
+            "example": "This is a test sentence.",
+        }]
+    }]
+}]
+
+
 class TestGetWord:
-    def test_returns_a_string(self):
+    @patch("spelling_bee._fetch_word_data", return_value=_MOCK_WORD_DATA)
+    def test_returns_a_string(self, _mock):
         word = get_word()
         assert isinstance(word, str)
 
-    def test_length_at_most_8(self):
+    @patch("spelling_bee._fetch_word_data", return_value=_MOCK_WORD_DATA)
+    def test_length_at_most_8(self, _mock):
         for _ in range(50):
             word = get_word()
             assert len(word) <= 8, f"'{word}' is longer than 8 characters"
 
-    def test_length_at_least_1(self):
+    @patch("spelling_bee._fetch_word_data", return_value=_MOCK_WORD_DATA)
+    def test_length_at_least_1(self, _mock):
         for _ in range(50):
             word = get_word()
             assert len(word) >= 1, "got an empty word"
 
-    def test_is_alphabetic(self):
+    @patch("spelling_bee._fetch_word_data", return_value=_MOCK_WORD_DATA)
+    def test_is_alphabetic(self, _mock):
         for _ in range(50):
             word = get_word()
             assert word.isalpha(), f"'{word}' contains non-alpha characters"
+
+    @patch("spelling_bee._fetch_word_data", return_value=_MOCK_WORD_DATA)
+    def test_word_comes_from_word_list(self, _mock):
+        for _ in range(50):
+            word = get_word()
+            assert word in WORD_LIST, f"'{word}' is not in the curated WORD_LIST"
+
+    @patch("spelling_bee._fetch_word_data", return_value=None)
+    def test_still_returns_word_when_api_unavailable(self, _mock):
+        word = get_word()
+        assert isinstance(word, str)
+        assert word in WORD_LIST
 
 
 class TestCheckSpelling:
@@ -431,3 +460,200 @@ class TestSubprocessTTS:
         cmd = mock_run.call_args[0][0]
         assert "-s" in cmd and "130" in cmd
         assert "-v" in cmd and "en+f3" in cmd
+
+
+class TestWordList:
+    """Validate the curated WORD_LIST meets basic quality requirements."""
+
+    def test_all_words_are_alphabetic(self):
+        for word in WORD_LIST:
+            assert word.isalpha(), f"'{word}' contains non-alpha characters"
+
+    def test_all_words_are_at_most_8_chars(self):
+        for word in WORD_LIST:
+            assert len(word) <= 8, f"'{word}' is longer than 8 characters"
+
+    def test_has_substantial_number_of_words(self):
+        assert len(WORD_LIST) >= 100
+
+    def test_no_duplicates(self):
+        assert len(WORD_LIST) == len(set(WORD_LIST)), "WORD_LIST contains duplicates"
+
+
+# ---------------------------------------------------------------------------
+# Realistic mock tests — verify definitions and sentences are parsed
+# correctly from real API response structures for common words
+# ---------------------------------------------------------------------------
+
+# Realistic API responses matching the Free Dictionary API format
+_REALISTIC_RESPONSES = {
+    "happy": [{"meanings": [{"partOfSpeech": "adjective", "definitions": [
+        {"definition": "Feeling or showing pleasure or contentment.",
+         "example": "Melissa came in looking happy and excited."}
+    ]}]}],
+    "garden": [{"meanings": [{"partOfSpeech": "noun", "definitions": [
+        {"definition": "A piece of ground adjoining a house, used for growing flowers.",
+         "example": "The house has a beautiful garden."}
+    ]}]}],
+    "bridge": [{"meanings": [{"partOfSpeech": "noun", "definitions": [
+        {"definition": "A structure carrying a road or path across an obstacle.",
+         "example": "A bridge across the river."}
+    ]}]}],
+    "believe": [{"meanings": [{"partOfSpeech": "verb", "definitions": [
+        {"definition": "Accept that something is true, especially without proof.",
+         "example": "I believe every word he says."}
+    ]}]}],
+    "kitchen": [{"meanings": [{"partOfSpeech": "noun", "definitions": [
+        {"definition": "A room or area where food is prepared and cooked.",
+         "example": "She went into the kitchen to fix some coffee."}
+    ]}]}],
+    "weather": [{"meanings": [{"partOfSpeech": "noun", "definitions": [
+        {"definition": "The state of the atmosphere at a particular place and time.",
+         "example": "If the weather is good we can go for a walk."}
+    ]}]}],
+    "journey": [{"meanings": [{"partOfSpeech": "noun", "definitions": [
+        {"definition": "An act of travelling from one place to another.",
+         "example": "She went on a long journey across the country."}
+    ]}]}],
+    "ancient": [{"meanings": [{"partOfSpeech": "adjective", "definitions": [
+        {"definition": "Belonging to the very distant past.",
+         "example": "The ancient civilizations of the Mediterranean."}
+    ]}]}],
+    "provide": [{"meanings": [{"partOfSpeech": "verb", "definitions": [
+        {"definition": "Make available for use; supply.",
+         "example": "These clubs provide a much appreciated service."}
+    ]}]}],
+    "example": [{"meanings": [{"partOfSpeech": "noun", "definitions": [
+        {"definition": "A thing characteristic of its kind or illustrating a rule.",
+         "example": "It is a good example of how unity works."}
+    ]}]}],
+}
+
+COMMON_WORDS = list(_REALISTIC_RESPONSES.keys())
+
+
+def _mock_fetch(word):
+    return _REALISTIC_RESPONSES.get(word)
+
+
+class TestDefinitionsForCommonWords:
+    """Verify definitions are correctly parsed for common words."""
+
+    @pytest.fixture(autouse=True)
+    def _clear_cache(self):
+        _word_cache.clear()
+        yield
+        _word_cache.clear()
+
+    @pytest.mark.parametrize("word", COMMON_WORDS)
+    @patch("spelling_bee._fetch_word_data", side_effect=_mock_fetch)
+    def test_definition_available(self, mock_fetch, word):
+        defn = get_definition(word)
+        assert defn is not None, f"No definition returned for '{word}'"
+        assert isinstance(defn, str) and len(defn) > 0
+
+    @pytest.mark.parametrize("word", COMMON_WORDS)
+    @patch("spelling_bee._fetch_word_data", side_effect=_mock_fetch)
+    def test_sentence_available(self, mock_fetch, word):
+        sent = get_sentence(word)
+        assert sent is not None, f"No sentence returned for '{word}'"
+        assert isinstance(sent, str) and len(sent) > 0
+
+
+class TestGetWordReturnsValidatedWord:
+    """Verify get_word only returns words with both definition and sentence."""
+
+    @pytest.fixture(autouse=True)
+    def _clear_cache(self):
+        _word_cache.clear()
+        yield
+        _word_cache.clear()
+
+    @patch("spelling_bee.WORD_LIST", COMMON_WORDS)
+    @patch("spelling_bee._fetch_word_data", side_effect=_mock_fetch)
+    def test_returned_word_has_definition_and_sentence(self, mock_fetch):
+        word = get_word()
+        assert get_definition(word) is not None, f"'{word}' has no definition"
+        assert get_sentence(word) is not None, f"'{word}' has no sentence"
+
+    @patch("spelling_bee._fetch_word_data", return_value=_MOCK_WORD_DATA)
+    def test_returned_word_is_from_word_list(self, mock_fetch):
+        for _ in range(20):
+            word = get_word()
+            assert word in WORD_LIST
+
+
+# ---------------------------------------------------------------------------
+# Live integration tests — hit the real Free Dictionary API
+# Skipped automatically when the API is unreachable.
+# Run with: pytest -m integration
+# ---------------------------------------------------------------------------
+
+def _api_reachable():
+    """Return True if the Free Dictionary API is reachable."""
+    import urllib.request
+    try:
+        urllib.request.urlopen(
+            "https://api.dictionaryapi.dev/api/v2/entries/en/hello", timeout=5
+        )
+        return True
+    except Exception:
+        return False
+
+_skip_no_api = pytest.mark.skipif(
+    not _api_reachable(),
+    reason="Free Dictionary API is unreachable",
+)
+
+
+@pytest.mark.integration
+@_skip_no_api
+class TestDefinitionIntegration:
+    """Verify that common words return a definition from the live API."""
+
+    @pytest.fixture(autouse=True)
+    def _clear_cache(self):
+        _word_cache.clear()
+        yield
+        _word_cache.clear()
+
+    @pytest.mark.parametrize("word", COMMON_WORDS)
+    def test_definition_available(self, word):
+        defn = get_definition(word)
+        assert defn is not None, f"No definition returned for '{word}'"
+        assert isinstance(defn, str) and len(defn) > 0
+
+
+@pytest.mark.integration
+@_skip_no_api
+class TestSentenceIntegration:
+    """Verify that common words return an example sentence from the live API."""
+
+    @pytest.fixture(autouse=True)
+    def _clear_cache(self):
+        _word_cache.clear()
+        yield
+        _word_cache.clear()
+
+    @pytest.mark.parametrize("word", COMMON_WORDS)
+    def test_sentence_available(self, word):
+        sent = get_sentence(word)
+        assert sent is not None, f"No sentence returned for '{word}'"
+        assert isinstance(sent, str) and len(sent) > 0
+
+
+@pytest.mark.integration
+@_skip_no_api
+class TestGetWordIntegration:
+    """Verify get_word returns a word with both definition and sentence."""
+
+    @pytest.fixture(autouse=True)
+    def _clear_cache(self):
+        _word_cache.clear()
+        yield
+        _word_cache.clear()
+
+    def test_returned_word_has_definition_and_sentence(self):
+        word = get_word()
+        assert get_definition(word) is not None, f"'{word}' has no definition"
+        assert get_sentence(word) is not None, f"'{word}' has no sentence"
