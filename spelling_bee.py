@@ -1,7 +1,10 @@
+import json
 import os
 import shutil
 import subprocess
 import sys
+import urllib.parse
+import urllib.request
 
 import pyttsx3
 from colorama import Fore, Style, init
@@ -50,6 +53,12 @@ class SubprocessTTS:
 
     def __init__(self):
         self._word = None
+        self._rate = None
+        self._voice = None
+
+    def set_voice_params(self, rate=None, voice=None):
+        self._rate = rate
+        self._voice = voice
 
     def say(self, word):
         self._word = word
@@ -61,14 +70,74 @@ class SubprocessTTS:
         self._word = None
         for base_cmd in self._COMMANDS:
             try:
-                subprocess.run(
-                    base_cmd + [word],
-                    check=True,
-                    capture_output=True,
-                )
+                cmd = list(base_cmd)
+                if base_cmd[0] in ("espeak-ng", "espeak"):
+                    if self._rate:
+                        cmd.extend(["-s", str(self._rate)])
+                    if self._voice:
+                        cmd.extend(["-v", self._voice])
+                cmd.append(word)
+                subprocess.run(cmd, check=True, capture_output=True)
                 return
             except (FileNotFoundError, subprocess.CalledProcessError):
                 continue
+
+
+_word_cache = {}
+
+
+def _fetch_word_data(word):
+    """Fetch word data from the Free Dictionary API, with simple caching."""
+    if word in _word_cache:
+        return _word_cache[word]
+    try:
+        url = f"https://api.dictionaryapi.dev/api/v2/entries/en/{urllib.parse.quote(word)}"
+        with urllib.request.urlopen(url, timeout=5) as resp:
+            data = json.loads(resp.read())
+        _word_cache[word] = data
+        return data
+    except Exception:
+        _word_cache[word] = None
+        return None
+
+
+def get_definition(word):
+    """Return the first definition for the word, or None."""
+    data = _fetch_word_data(word)
+    if not data:
+        return None
+    try:
+        return data[0]["meanings"][0]["definitions"][0]["definition"]
+    except (KeyError, IndexError):
+        return None
+
+
+def get_sentence(word):
+    """Return an example sentence for the word, or None."""
+    data = _fetch_word_data(word)
+    if not data:
+        return None
+    try:
+        for meaning in data[0]["meanings"]:
+            for defn in meaning["definitions"]:
+                if "example" in defn:
+                    return defn["example"]
+    except (KeyError, IndexError):
+        pass
+    return None
+
+
+def configure_voice(engine):
+    """Configure TTS engine for a slower, friendlier female voice."""
+    if isinstance(engine, SubprocessTTS):
+        engine.set_voice_params(rate=130, voice="en+f3")
+        return
+    engine.setProperty("rate", 130)
+    voices = engine.getProperty("voices")
+    for voice in voices:
+        if getattr(voice, "gender", None) == "Female":
+            engine.setProperty("voice", voice.id)
+            return
 
 
 def init_tts_engine():
@@ -168,11 +237,29 @@ def format_failure(correct, matches, accuracy):
 def play_round(word, engine):
     speak_word(word, engine)
     while True:
-        attempt = input("Type your spelling: ")
-        if attempt.strip().lower() in ("r", "repeat"):
+        print("\n1. Hear the word again")
+        print("2. Get the definition")
+        print("3. Hear the word in a sentence")
+        print("4. Spell the word")
+        choice = input("\nChoose an option: ").strip()
+        if choice == "1":
             speak_word(word, engine)
-            continue
-        break
+        elif choice == "2":
+            defn = get_definition(word)
+            if defn:
+                print(f"\nDefinition: {defn}")
+            else:
+                print("\nDefinition not available.")
+        elif choice == "3":
+            sentence = get_sentence(word)
+            if sentence:
+                print(f"\nSentence: {sentence}")
+                speak_word(sentence, engine)
+            else:
+                print("\nSentence not available.")
+        elif choice == "4":
+            break
+    attempt = input("Type your spelling: ")
     if check_spelling(word, attempt):
         print(format_success())
     else:
@@ -184,6 +271,7 @@ def main():
     init()
     try:
         engine = init_tts_engine()
+        configure_voice(engine)
     except Exception as e:
         print(f"{Fore.RED}Failed to initialise text-to-speech: {e}{Style.RESET_ALL}")
         sys.exit(1)

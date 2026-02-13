@@ -1,10 +1,11 @@
+import json
 import subprocess
 from unittest.mock import MagicMock, patch, call
 from colorama import Fore, Style
 from spelling_bee import (
     get_word, check_spelling, compare, format_success, format_failure,
     speak_word, play_round, init_tts_engine, _find_espeak_library,
-    SubprocessTTS,
+    SubprocessTTS, get_definition, get_sentence, configure_voice,
 )
 
 
@@ -149,8 +150,87 @@ class TestSpeakWord:
         assert call_order == ["say", "runAndWait"]
 
 
+class TestGetDefinition:
+    @patch("spelling_bee._fetch_word_data", return_value=[{
+        "meanings": [{"definitions": [{"definition": "a round fruit"}]}]
+    }])
+    def test_returns_first_definition(self, mock_fetch):
+        assert get_definition("apple") == "a round fruit"
+
+    @patch("spelling_bee._fetch_word_data", return_value=None)
+    def test_returns_none_on_fetch_failure(self, mock_fetch):
+        assert get_definition("apple") is None
+
+    @patch("spelling_bee._fetch_word_data", return_value=[{"meanings": []}])
+    def test_returns_none_when_no_meanings(self, mock_fetch):
+        assert get_definition("apple") is None
+
+
+class TestGetSentence:
+    @patch("spelling_bee._fetch_word_data", return_value=[{
+        "meanings": [{"definitions": [
+            {"definition": "...", "example": "I ate an apple."}
+        ]}]
+    }])
+    def test_returns_example_sentence(self, mock_fetch):
+        assert get_sentence("apple") == "I ate an apple."
+
+    @patch("spelling_bee._fetch_word_data", return_value=[{
+        "meanings": [{"definitions": [{"definition": "..."}]}]
+    }])
+    def test_returns_none_when_no_example(self, mock_fetch):
+        assert get_sentence("apple") is None
+
+    @patch("spelling_bee._fetch_word_data", return_value=None)
+    def test_returns_none_on_fetch_failure(self, mock_fetch):
+        assert get_sentence("apple") is None
+
+    @patch("spelling_bee._fetch_word_data", return_value=[{
+        "meanings": [
+            {"definitions": [{"definition": "meaning 1"}]},
+            {"definitions": [{"definition": "meaning 2", "example": "Found it!"}]}
+        ]
+    }])
+    def test_searches_across_meanings(self, mock_fetch):
+        assert get_sentence("test") == "Found it!"
+
+
+class TestConfigureVoice:
+    def test_sets_slower_rate_on_pyttsx3_engine(self):
+        engine = MagicMock()
+        engine.getProperty.return_value = []
+        configure_voice(engine)
+        engine.setProperty.assert_any_call("rate", 130)
+
+    def test_selects_female_voice_on_pyttsx3(self):
+        engine = MagicMock()
+        female_voice = MagicMock()
+        female_voice.gender = "Female"
+        female_voice.id = "english+f3"
+        engine.getProperty.return_value = [female_voice]
+        configure_voice(engine)
+        engine.setProperty.assert_any_call("voice", "english+f3")
+
+    def test_skips_non_female_voices(self):
+        engine = MagicMock()
+        male_voice = MagicMock()
+        male_voice.gender = "Male"
+        male_voice.id = "english"
+        engine.getProperty.return_value = [male_voice]
+        configure_voice(engine)
+        # Should only set rate, not voice (no female found)
+        calls = [c for c in engine.setProperty.call_args_list if c[0][0] == "voice"]
+        assert len(calls) == 0
+
+    def test_sets_params_on_subprocess_tts(self):
+        tts = SubprocessTTS()
+        configure_voice(tts)
+        assert tts._rate == 130
+        assert tts._voice == "en+f3"
+
+
 class TestPlayRound:
-    @patch("builtins.input", return_value="apple")
+    @patch("builtins.input", side_effect=["4", "apple"])
     def test_correct_answer_prints_success(self, mock_input, capsys):
         engine = MagicMock()
         play_round("apple", engine)
@@ -158,7 +238,7 @@ class TestPlayRound:
         assert "\u2705" in captured.out
         assert Fore.GREEN in captured.out
 
-    @patch("builtins.input", return_value="aple")
+    @patch("builtins.input", side_effect=["4", "aple"])
     def test_wrong_answer_prints_failure(self, mock_input, capsys):
         engine = MagicMock()
         play_round("apple", engine)
@@ -166,24 +246,63 @@ class TestPlayRound:
         assert "\u274c" in captured.out
         assert "%" in captured.out
 
-    @patch("builtins.input", side_effect=["r", "apple"])
-    def test_repeat_speaks_word_again(self, mock_input):
+    @patch("builtins.input", side_effect=["1", "4", "apple"])
+    def test_option_1_repeats_word(self, mock_input):
         engine = MagicMock()
         play_round("apple", engine)
         # Initial speak + repeat = 2 calls to say
         assert engine.say.call_count == 2
 
-    @patch("builtins.input", side_effect=["repeat", "apple"])
-    def test_repeat_full_word_speaks_again(self, mock_input):
+    @patch("spelling_bee.get_definition", return_value="a round fruit")
+    @patch("builtins.input", side_effect=["2", "4", "apple"])
+    def test_option_2_shows_definition(self, mock_input, mock_def, capsys):
         engine = MagicMock()
         play_round("apple", engine)
-        assert engine.say.call_count == 2
+        captured = capsys.readouterr()
+        assert "a round fruit" in captured.out
 
-    @patch("builtins.input", return_value="apple")
+    @patch("spelling_bee.get_definition", return_value=None)
+    @patch("builtins.input", side_effect=["2", "4", "apple"])
+    def test_option_2_handles_missing_definition(self, mock_input, mock_def, capsys):
+        engine = MagicMock()
+        play_round("apple", engine)
+        captured = capsys.readouterr()
+        assert "not available" in captured.out.lower()
+
+    @patch("spelling_bee.get_sentence", return_value="I ate an apple.")
+    @patch("builtins.input", side_effect=["3", "4", "apple"])
+    def test_option_3_shows_and_speaks_sentence(self, mock_input, mock_sent, capsys):
+        engine = MagicMock()
+        play_round("apple", engine)
+        captured = capsys.readouterr()
+        assert "I ate an apple." in captured.out
+        # Initial word speak + sentence speak = 2 say calls
+        engine.say.assert_any_call("apple")
+        engine.say.assert_any_call("I ate an apple.")
+
+    @patch("spelling_bee.get_sentence", return_value=None)
+    @patch("builtins.input", side_effect=["3", "4", "apple"])
+    def test_option_3_handles_missing_sentence(self, mock_input, mock_sent, capsys):
+        engine = MagicMock()
+        play_round("apple", engine)
+        captured = capsys.readouterr()
+        assert "not available" in captured.out.lower()
+
+    @patch("builtins.input", side_effect=["4", "apple"])
     def test_speaks_word_at_start(self, mock_input):
         engine = MagicMock()
         play_round("apple", engine)
-        engine.say.assert_called_with("apple")
+        engine.say.assert_any_call("apple")
+
+    @patch("builtins.input", side_effect=["4", "apple"])
+    def test_displays_menu_options(self, mock_input, capsys):
+        engine = MagicMock()
+        play_round("apple", engine)
+        captured = capsys.readouterr()
+        assert "1." in captured.out
+        assert "2." in captured.out
+        assert "3." in captured.out
+        assert "4." in captured.out
 
 
 class TestFindEspeakLibrary:
@@ -302,3 +421,13 @@ class TestSubprocessTTS:
         tts = SubprocessTTS()
         tts.say("word")
         tts.runAndWait()  # should not raise
+
+    @patch("subprocess.run")
+    def test_applies_voice_params_to_espeak(self, mock_run):
+        tts = SubprocessTTS()
+        tts.set_voice_params(rate=130, voice="en+f3")
+        tts.say("hello")
+        tts.runAndWait()
+        cmd = mock_run.call_args[0][0]
+        assert "-s" in cmd and "130" in cmd
+        assert "-v" in cmd and "en+f3" in cmd
