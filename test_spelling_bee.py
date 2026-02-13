@@ -1,6 +1,10 @@
-from unittest.mock import MagicMock, patch
+import os
+from unittest.mock import MagicMock, patch, call
 from colorama import Fore, Style
-from spelling_bee import get_word, check_spelling, compare, format_success, format_failure, speak_word, play_round
+from spelling_bee import (
+    get_word, check_spelling, compare, format_success, format_failure,
+    speak_word, play_round, init_tts_engine, _find_espeak_library,
+)
 
 
 class TestGetWord:
@@ -179,3 +183,64 @@ class TestPlayRound:
         engine = MagicMock()
         play_round("apple", engine)
         engine.say.assert_called_with("apple")
+
+
+class TestFindEspeakLibrary:
+    @patch("shutil.which", return_value=None)
+    def test_returns_none_when_no_binary_found(self, mock_which):
+        assert _find_espeak_library() is None
+
+    @patch("os.path.isfile", return_value=True)
+    @patch("shutil.which", side_effect=lambda b: "/data/data/com.termux/files/usr/bin/espeak-ng" if b == "espeak-ng" else None)
+    def test_finds_library_via_espeak_ng_binary(self, mock_which, mock_isfile):
+        result = _find_espeak_library()
+        assert result is not None
+        assert "/data/data/com.termux/files/usr/lib/" in result
+
+    @patch("os.path.isfile", return_value=True)
+    @patch("shutil.which", side_effect=lambda b: "/usr/local/bin/espeak" if b == "espeak" else None)
+    def test_finds_library_via_espeak_binary(self, mock_which, mock_isfile):
+        result = _find_espeak_library()
+        assert result is not None
+        assert "/usr/local/lib/" in result
+
+    @patch("os.path.isfile", return_value=False)
+    @patch("shutil.which", return_value="/usr/bin/espeak-ng")
+    def test_returns_none_when_binary_exists_but_no_lib(self, mock_which, mock_isfile):
+        assert _find_espeak_library() is None
+
+    @patch("os.path.isfile", side_effect=lambda p: p.endswith("libespeak-ng.so"))
+    @patch("shutil.which", side_effect=lambda b: "/prefix/bin/espeak-ng" if b == "espeak-ng" else None)
+    def test_tries_multiple_lib_names(self, mock_which, mock_isfile):
+        result = _find_espeak_library()
+        assert result.endswith("libespeak-ng.so")
+
+
+class TestInitTtsEngine:
+    @patch("spelling_bee.pyttsx3")
+    def test_returns_engine_when_init_succeeds(self, mock_pyttsx3):
+        mock_engine = MagicMock()
+        mock_pyttsx3.init.return_value = mock_engine
+        engine = init_tts_engine()
+        assert engine is mock_engine
+        mock_pyttsx3.init.assert_called_once()
+
+    @patch("spelling_bee._find_espeak_library", return_value=None)
+    @patch("spelling_bee.pyttsx3")
+    def test_raises_when_init_fails_and_no_lib_found(self, mock_pyttsx3, mock_find):
+        mock_pyttsx3.init.side_effect = RuntimeError("eSpeak not installed")
+        try:
+            init_tts_engine()
+            assert False, "Should have raised"
+        except RuntimeError as e:
+            assert "eSpeak" in str(e)
+
+    @patch("spelling_bee._find_espeak_library", return_value="/termux/lib/libespeak-ng.so")
+    @patch("spelling_bee.pyttsx3")
+    def test_retries_with_patched_loader_when_lib_found(self, mock_pyttsx3, mock_find):
+        mock_engine = MagicMock()
+        # First call fails, second (after patching) succeeds
+        mock_pyttsx3.init.side_effect = [RuntimeError("eSpeak not installed"), mock_engine]
+        engine = init_tts_engine()
+        assert engine is mock_engine
+        assert mock_pyttsx3.init.call_count == 2
